@@ -1,0 +1,907 @@
+---
+title: "\\vspace{-1cm}  Data Mining and Statistical Learning"
+subtitle: '**Homework 4**'
+geometry: "right = 2cm, left = 2cm, top = 2cm, bottom = 2cm"
+output:
+  pdf_document: default
+  fig_caption: yes
+urlcolor: blue
+header-includes:
+- \usepackage{booktabs}
+- \usepackage{setspace}\doublespacing
+- \usepackage{placeins}
+---
+
+$\vspace{-0.5cm}$
+```{r initial-settings, include=FALSE}
+# Settings
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.pos = 'H')
+```
+
+```{r installing-packages, warning = FALSE, message=FALSE}
+
+# Check if packages are installed. If not, install them.
+install.packages <- function(pkg) {
+    new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+    if (length(new.pkg)) {
+        install.packages(new.pkg)
+    }
+}
+
+packages <- c("ggplot2", "mcmcplots", "knitr","xtable", "kableExtra","klaR","kernlab","kknn",
+              "reshape2", "devtools","MASS","glmnet", "lares", "caret","GGally",
+              "splines", "class", "dplyr", "PerformanceAnalytics",  "factoextra")
+
+install.packages(packages)
+library(mcmcplots)                            
+library(knitr)                               
+library(kableExtra)                         
+library(ggplot2)
+library(reshape2)
+library(devtools)
+library(splines)
+library(extrafont)
+library(xtable)
+library(dplyr)
+library(akima)
+library(plotly)
+library(factoextra)
+library(GGally)
+library(tidyr)
+options(kableExtra.latex.load_packages = FALSE)
+loadfonts()
+```
+
+# Introduction
+
+Nonparametric regression estimators (also known as **"smoothers"**) attempt to estimate the unknown function $f(X)$  from a sample of noisy data over certain domain ($R^P$) by estimating what $f(x)$ is at a point $x_0$. This can be accomplished by using only those observations close to $x_0$ to fit a simple model and the resulting estimated function $\hat f(X)$ is smooth in $R^p$.
+This is all achieved using a kernel function $K_{h}(x_0, x_i)$ where $h$ is the smoothing parameter which needs to be determined. In practice, the smoothing parameter $h \approx n^{\frac{-1}{5}}$ where $n$ is the number of samples in the data.
+
+There are several local smoothing methods like **LOESS**, **Nadaraya-Watson**, and **Spline** and the goal of this homework is to understand their statistical properties and computational challenges. 
+
+# Problem Statement and Data Set
+
+The objective of our analysis as previously stated is to understand the statistical properties  and computational challenges of three different types of local smoothing methods: **LOESS**, **Nadaraya-Watson**, and **Spline** smoothing.
+
+For this purpose, we will compute the empirical bias, empirical variances, and empirical mean square error (MSE) based on $m=1000$ Monte Carlo runs, where in each run we simulate a data set of $n = 101$ observations from the additive noise model $Y_i = f(x_i) + \epsilon_i$ with the famous Ricker's wavelet, also known as the Mexican Hat function defined by $f(x) = (1 - x^2) e^{-0.5x^2}$ over the interval $-2\pi \le x \le 2\pi$.
+
+The added white noise $\epsilon_1...\epsilon_n$ are independent and identically distributed (iid) $\approx N(0, 0.2^2)$. 
+
+The Mexican hat function is notoriously known to pose a variety of estimation challenges. Thus, this report will attempt to explore the inherent difficulties of this function.
+
+\newpage
+
+# Exploratory Data Analysis
+
+We first start this analysis by looking what the Mexican hat looks like for both equidistant and non-equidistant designs.
+
+```{r fig1, fig.width=15,fig.height=6,fig.cap="\\label{fig:fig1}The Mexican hat function"}
+## Read data
+par(mfrow=c(1,2))
+n <- 101
+x <- 2*pi*seq(-1, 1, length=n)
+mh <- (1- x**2)*exp(-0.5*x**2);
+plot(x, mh, col="magenta", main="Equidistant data points", pch=20)
+
+x1 <- round(2*pi*sort(c(0.5, -1 + rbeta(50,2,2), rbeta(50,2,2))), 8)
+mh2 <- (1- x1**2)*exp(-0.5*x1**2);
+plot(x1, mh2, col="lightblue", main="Non-Equidistant points", pch=20)
+
+```
+
+We can see that the Mexican hat function converges to zero when $x$ approaches $-\infty$ or $+\infty$. Now, let's look at the distribution of the Ricker's wavelet through a histogram plot
+
+```{r fig2, fig.width=15,fig.height=6,fig.cap="\\label{fig:fig2}The histogram plot of the mexican hat"}
+library(patchwork)
+p1 <- ggplot(gather(data.frame(mh)), aes(value)) + 
+    geom_histogram(bins = 45, fill = 'orange', color='black') +
+    facet_wrap(~key, scales = 'free') +
+    theme_classic()+ ggtitle("Mexican hat of equidistant points")
+
+p2 <- ggplot(gather(data.frame(mh2)), aes(value)) + 
+    geom_histogram(bins = 45, fill = 'limegreen', color='black') +
+    facet_wrap(~key, scales = 'free') +
+    theme_classic()+ ggtitle("Mexican hat of non-equidistant points")
+
+p1 + p2
+```
+
+The histograms are as expected. Additionally, we can see roughly where the peaks of the distribution are, whether the distribution is skewed or symmetric, and if there are any outliers. 
+
+\newpage
+# Methodology
+
+This analysis is split into two deterministic experiments where in the first experiment, we use an equidistant points in the interval $[-2\pi, 2\pi]$, and in second we use a non equidistant points in the same interval as inputs to the Mexican hat function.
+
+In the first experiment, we run a $m = 1000$ Monte Carlo run to generate a data set of the form $(x_i, Y_i)$ with $x_i = 2\pi (-1 + 2\frac{i -1}{n - 1})$ and $Y_i = f(x_i) + \epsilon_i$. For each Monte Carlo run, we compute the three different kinds of local smoothing estimates at every point in simulated dataset: loess (with span = 0.75), Nadaraya-Watson (NW) kernel smoothing with Gaussian Kernel and bandwidth = 0.2, and spline smoothing with the default tuning parameter. 
+
+At each point $x_i$; for each local smoothing method, based on $m = 1000$ Monte Carlo runs, we compute the empirical bias, empirical variance, and empirical mean square error (MSE), which are defined as:
+
+- $\widehat{\text{Bias}(f(x_i))} = \bar{f_m}(x_i) - f(x_i)$,  where $\bar{f_m}(x_i) = \frac{1}{m}\sum_{j=1}^m \hat{f^{(j)}}(x_i)$
+
+- $\widehat{\text{Var}(f(x_i))} = \frac{1}{m}\sum_{j=1}^m \big(\hat{f^{(j)}}(x_i) - \bar{f_m}(x_i)\big)^2$
+
+- $\widehat{\text{MSE}(f(x_i))} = \frac{1}{m}\sum_{j=1}^m \big(\hat{f^{(j)}}(x_i) - f(x_i)\big)^2$,  where $f(x_i) = (1 - x^2) e^{-0.5x^2}$
+
+In the second experiment, we repeat the first experiment with non-equidistant points as previously mentioned. For simplicity and reasonable comparison, we use $\text{span} = 0.3365$ for loess, $\text{bandwidth}= 0.2$ for NW kernel smoothing, and $\text{spar} = 0.7163$ for Splines smoothing. 
+
+Next, we will explore the effect smoothing parameter by trying different values and looking at the fit of each smoother. Additionally, we will tune each smoothing parameter using a Leave-One-Out Cross Validation or LOOCV. Cross Validation is a crucial step to estimate the prediction error of each of the regression estimators. 
+
+LOOCV works by splitting the data into a training and testing sets, using all but one data point as part of the training set. We then build a model using the training set, predict on the single observation we left out, then calculate the mean square error of the model. We repeat the process $n$ times, where $n$ is the number of observations we have in the dataset. 
+
+After tuning the smoothing parameters, we will repeat the two experimental designs with the newly tuned parameters to assess their affect.
+
+\newpage 
+# Results
+
+## Part 1: Experiments with default smoothing parameters
+
+The results of each experimental design accompanied with plots can be summarized below
+
+### 1. Deterministic equidistant design
+
+We can plot (seen below)the the mean of the three local smoothing estimators: loess, NW kernel, and spline smoothing along with the raw observations to compare with the fitted curves
+
+```{r fig3, fig.width=7,fig.height=5,fig.cap="\\label{fig:fig3}The mean of the three local smoothing estimators with raw observations"}
+## Part #1 deterministic equidistant design
+## Generate n=101 equidistant points in [-2\pi, 2\pi]
+set.seed(42)
+m <- 1000
+n <- 101
+x <- 2*pi*seq(-1, 1, length=n)
+## Initialize the matrix of fitted values for three methods
+fvlp <- fvnw <- fvss <- matrix(0, nrow= n, ncol= m)
+##Generate data, fit the data and store the fitted values
+for (j in 1:m){
+
+  ## simulate y-values
+  y <- (1- x**2)*exp(-0.5*x**2) + rnorm(length(x), sd=0.2);
+  
+  ## Get the estimates and store them
+  fvlp[,j] <- predict(loess(y ~ x, span = 0.75), newdata = x);
+  fvnw[,j] <- ksmooth(x, y, kernel="normal", bandwidth= 0.2, x.points=x)$y;
+  fvss[,j] <- predict(smooth.spline(y ~ x), x=x)$y
+}
+## Below is the sample R code to plot the mean of three estimators in a single plot
+meanlp = apply(fvlp,1,mean);
+meannw = apply(fvnw,1,mean);
+meanss = apply(fvss,1,mean);
+dmin = min( meanlp, meannw, meanss);
+dmax = max( meanlp, meannw, meanss);
+matplot(x, meanlp, "l", ylim=c(dmin, dmax), ylab="Response")
+matlines(x, meannw, col="red", lty=5)
+matlines(x, meanss, col="blue", lty=6)
+points(x,mh, pch=20)
+par_lty <- c(1,5,6)
+## Line colors parameters
+par_col <- c("black", "red", "blue")
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+## BIAS = f_hat - f
+biaslp = meanlp - mh
+biasnw = meannw - mh
+biasss = meanss - mh
+
+## VAR
+varlp = apply((fvlp - meanlp)**2, 1, mean);
+varnw = apply((fvnw - meannw)**2, 1, mean);
+varss = apply((fvss - meanss)**2, 1, mean);
+
+## MSE
+MSElp.emp = apply((fvlp - mh)**2, 1, mean);
+MSEnw.emp = apply((fvnw - mh)**2, 1, mean);
+MSEss.emp = apply((fvss - mh)**2, 1, mean);
+
+## MSE = BIAS^2 + VAR
+MSElp.calc = biaslp**2 + varlp
+MSEnw.calc = biasnw**2 + varnw
+MSEss.calc = biasss**2 + varss
+
+```
+
+From looking at the mean of each estimator with the raw observations, we can clearly see that Loess kernel is probably not the best estimator for this special function. The other two kernel, seem to fit the data better with NW kernel performing the best.
+
+\newpage
+Next, we will plot the bias and variance of three local smoothing estimators
+
+```{r fig4, fig.width=20,fig.height=7,fig.cap="\\label{fig:fig4}The empirical bias and variance of three local smoothing estimators"}
+par(mfrow=c(1,2))
+
+# plot BIAS
+dmin = min( biaslp, biasnw, biasss);
+dmax = max( biaslp, biasnw, biasss);
+
+matplot(x, biaslp, "l", ylim=c(dmin, dmax),  ylab="Response", main="Empirical bias")
+matlines(x, biasnw, col="red", lty=5)
+matlines(x, biasss, col="blue", lty=6)
+par_lty <- c(1,5,6)
+## Line colors parameters
+par_col <- c("black", "red", "blue")
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+# plot variance
+dmin = min( varlp, varnw, varss);
+dmax = max( varlp, varnw, varss);
+
+matplot(x, varlp, "l", ylim=c(dmin, dmax),ylab="Response", main="Empirical variance")
+matlines(x, varnw, col="red", lty=5)
+matlines(x, varss, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+```
+
+Loess estimator has the highest bias of the three estimator, while NW kernel has the lowest bias. Spline kernel performed better than Loess but we can see that it's very hard to estimate the Mexican hat function at $x_i = 0$, $x_i = +/- \frac{\pi}{2}$. In terms of variance, Loess has the lowest variance, while NW kernel has the highest variance
+
+Next, we plot the empirical MSE of each local smoothing method using the following two methods:
+
+-  $\widehat{\text{MSE}(f(x_i))} = \frac{1}{m}\sum_{j=1}^m \big(\hat{f^{(j)}}(x_i) - f(x_i)\big)^2$
+
+- $\text{MSE} = \text{BIAS}^2 + \text{VAR}$
+
+```{r fig5, fig.width=20,fig.height=7,fig.cap="\\label{fig:fig5}The MSE of the three local smoothing estimators"}
+par(mfrow=c(1,2))
+# plot MSEs
+dmin = min( MSElp.emp, MSEnw.emp, MSEss.emp);
+dmax = max( MSElp.emp, MSEnw.emp, MSEss.emp);
+
+matplot(x, MSElp.emp, "l", ylim=c(dmin, dmax), main="Empirical MSE", ylab="Response")
+matlines(x, MSEnw.emp, col="red", lty=5)
+matlines(x, MSEss.emp, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+dmin = min( MSElp.calc, MSEnw.calc, MSEss.calc);
+dmax = max( MSElp.calc, MSEnw.calc, MSEss.calc);
+matplot(x, MSElp.calc, "l", ylim=c(dmin, dmax), main= expression(MSE = Bias^2 + var),ylab="Response")
+matlines(x, MSEnw.calc, col="red", lty=5)
+matlines(x, MSEss.calc, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+```
+
+In terms of MSE, Loess has the highest MSE that peaks at $x_i = 0$, $x_i = +/- \frac{\pi}{2}$. Splines smoothing kernel has the lowest MSE. 
+
+\newpage
+
+### 2. Deterministic Non-Equidistant design
+
+Again, we plot the the mean of the three local smoothing estimators along with the raw observations to compare with the fitted curves.
+
+```{r fig6, fig.width=7,fig.height=5,fig.cap="\\label{fig:fig6}The mean of the three local smoothing estimators with raw observations"}
+## Part #2 non-equidistant design
+
+set.seed(78)
+x2 <- round(2*pi*sort(c(0.5, -1 + rbeta(50,2,2), rbeta(50,2,2))), 8)
+mh2 <- (1- x2^2)*exp(-0.5*x2^2)
+m <- 10
+n <- 101
+## Initialize the matrix of fitted values for three methods
+fvlp2 <- fvnw2 <- fvss2 <- matrix(0, nrow= n, ncol= m)
+
+##Generate data, fit the data and store the fitted values
+for (j in 1:m){
+
+  ## simulate y-values
+  y2 <- (1- x2^2)*exp(-0.5*x2^2) + rnorm(length(x2), sd=0.2);
+  
+  ## Get the estimates and store them
+  fvlp2[,j] <- predict(loess(y2 ~ x2, span = 0.3365), newdata = x2);
+  fvnw2[,j] <- ksmooth(x2, y2, kernel="normal", bandwidth= 0.2, x.points=x2)$y;
+  fvss2[,j] <- predict(smooth.spline(y2 ~ x2, spar= 0.7163), x=x2)$y
+}
+
+
+## Below is the sample R code to plot the mean of three estimators in a single plot
+meanlp = apply(fvlp2,1,mean);
+meannw = apply(fvnw2,1,mean);
+meanss = apply(fvss2,1,mean);
+
+dmin = min( meanlp, meannw, meanss);
+dmax = max( meanlp, meannw, meanss);
+matplot(x2, meanlp, "l", ylim=c(dmin, dmax), ylab="Response")
+matlines(x2, meannw, col="red", lty=5)
+matlines(x2, meanss, col="blue", lty=6)
+points(x2, mh2, pch=20)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+
+## BIAS
+biaslp = meanlp - mh2
+biasnw = meannw - mh2
+biasss = meanss - mh2
+
+## VAR
+varlp = apply((fvlp2 - meanlp)**2, 1, mean);
+varnw = apply((fvnw2 - meannw)**2, 1, mean);
+varss = apply((fvss2 - meanss)**2, 1, mean);
+
+
+## MSE
+MSElp.emp = apply((fvlp2 - mh2)**2, 1, mean);
+MSEnw.emp = apply((fvnw2 - mh2)**2, 1, mean);
+MSEss.emp = apply((fvss2 - mh2)**2, 1, mean);
+
+## MSE = BIAS^2 + VAR
+MSElp.calc = biaslp**2 + varlp
+MSEnw.calc = biasnw**2 + varnw
+MSEss.calc = biasss**2 + varss
+
+```
+
+Looking at the mean of each estimator in this non-equidistant design, we see a non-smooth piece-wise fit. However, Loess estimator has performed much better than the equidistant design. NW kernel yet again outperforming the other two kernel estimators. Splines smoother didn't perform as good as the equidistant design.
+
+\newpage
+Next, we look at the plots of the empirical bias and variance of three local smoothing estimators.
+
+```{r fig7, fig.width=20,fig.height=7,fig.cap="\\label{fig:fig7}The empirical bias and variance of the three local smoothing estimators"}
+par(mfrow=c(1,2))
+# plot BIAS
+dmin = min( biaslp, biasnw, biasss);
+dmax = max( biaslp, biasnw, biasss);
+matplot(x2, biaslp, "l", ylim=c(dmin, dmax), ylab="Response", main="Empirical bias")
+matlines(x2, biasnw, col="red", lty=5)
+matlines(x2, biasss, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+# plot variance
+dmin = min( varlp, varnw, varss);
+dmax = max( varlp, varnw, varss);
+matplot(x2, varlp, "l", ylim=c(dmin, dmax), ylab="Response", main="Empirical variance")
+matlines(x2, varnw, col="red", lty=5)
+matlines(x2, varss, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+```
+
+From the bias plots above, we see that both Splines and Loess estimators had computational challenges at estimating the function at $x_i = 0$, $x_i = +/- \frac{\pi}{2}$. It is quite noticeable at $x_i = 0$. Both however has the lowest variance which hints to the bias-variance traeoff. 
+
+NW kernel has the lowest bias on average across all $x_i$ points, but the highest variance. 
+
+Next, we look at the plots for the empirical MSE of each local smoothing method using the following:
+
+-  $\widehat{\text{MSE}(f(x_i))} = \frac{1}{m}\sum_{j=1}^m \big(\hat{f^{(j)}}(x_i) - f(x_i)\big)^2$
+
+- $\text{MSE} = \text{BIAS}^2 + \text{VAR}$
+
+```{r fig8, fig.width=20,fig.height=7,fig.cap="\\label{fig:fig8}The MSE of the three local smoothing estimators"}
+par(mfrow=c(1,2))
+# plot MSEs
+dmin = min( MSElp.emp, MSEnw.emp, MSEss.emp);
+dmax = max( MSElp.emp, MSEnw.emp, MSEss.emp);
+matplot(x2, MSElp.emp, "l", ylim=c(dmin, dmax), main="Empirical MSE", ylab="Response")
+matlines(x2, MSEnw.emp, col="red", lty=5)
+matlines(x2, MSEss.emp, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+dmin = min( MSElp.calc, MSEnw.calc, MSEss.calc);
+dmax = max( MSElp.calc, MSEnw.calc, MSEss.calc);
+matplot(x2, MSElp.calc, "l", ylim=c(dmin, dmax),  main=expression(MSE = Bias^2 + var), ylab="Response")
+matlines(x2, MSEnw.calc, col="red", lty=5)
+matlines(x2, MSEss.calc, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+```
+
+In terms of MSE, both Splines and Loess have the highest MSE that peaks at $x_i = 0$. NW smoothing kernel has the lowest MSE. The variance is so small that the meas square error is proportional to $\text{bias}^2$.
+
+## Part 2: Cross validation
+
+Before we start fine tuning each of the smoothing parameters for each smoothing method, let's first see how the estimate model fit the function using different values for bandwidth, span, and spar for NW kernel, Loess, and Splines smoother respectively. 
+
+### 1. Effect of different smoothing parameters
+
+We can examine the effect of each of the smoothing parameters using equidistant points through the following plots.
+
+```{r fig9, fig.width=20,fig.height=6,fig.cap="\\label{fig:fig9}Smoothing methods with different parameter values"}
+par(mfrow=c(1,3))
+
+# set y
+y <- (1- x**2)*exp(-0.5*x**2) + rnorm(length(x), sd=0.2);
+# Loess smoother
+loess1 = loess(y ~ x, span = 0.15)
+loess2 = loess(y ~ x, span = 0.25)
+loess3 = loess(y ~ x, span = 0.35)
+loess4 = loess(y ~ x, span = 0.55)
+
+plot(x,y, pch=20)
+lines(predict(loess1), x=x, lwd=3, col="orange")
+lines(predict(loess2),x=x, lwd=3, col="lightblue")
+lines(predict(loess3),x=x,  lwd=3, col="limegreen")
+lines(predict(loess4),x=x,  lwd=3, col="magenta")
+legend("topleft", c("span=0.15", "span=0.25", "span=0.35", "span=0.55"), lwd=6, col=c("orange", "lightblue", "limegreen", "magenta"))
+
+# spline smoother
+splines1 = smooth.spline(x=x,y=y,spar=0.2)
+splines2 = smooth.spline(x=x,y=y,spar=0.4)
+splines3 = smooth.spline(x=x,y=y,spar=0.8)
+splines4 = smooth.spline(x=x,y=y,spar=0.5)
+
+plot(x,y,pch=20)
+lines(splines1, lwd=3, col="orange")
+lines(splines2, lwd=3, col="lightblue")
+lines(splines3, lwd=3, col="limegreen")
+lines(splines4, lwd=3, col="magenta")
+legend("topleft", c("spar=0.2","spar=0.4","spar=0.8","spar=0.5"), lwd=6, col=c("orange", "lightblue", "limegreen", "magenta"))
+
+# NW kernel smoother
+NW1 = ksmooth(x=x,y=y,kernel = "normal",bandwidth = 0.5)
+NW2 = ksmooth(x=x,y=y,kernel = "normal",bandwidth = 0.9)
+NW3 = ksmooth(x=x,y=y,kernel = "normal",bandwidth = 1.5)
+NW4 = ksmooth(x=x,y=y,kernel = "normal",bandwidth = 2.0)
+
+plot(x,y,pch=20)
+lines(NW1, lwd=3, col="orange")
+lines(NW2, lwd=3, col="lightblue")
+lines(NW3, lwd=3, col="limegreen")
+lines(NW4, lwd=3, col="magenta")
+legend("topleft", c("bandwidth=0.5","bandwidth=0.9","bandwidth=1.5", "bandwidth=2.0"),lwd=6, col=c("orange", "lightblue", "limegreen", "magenta"))
+```
+
+For NW kernel or splines smoothing, if $h$/$\lambda$ (bandwidth/spar) is small, then the curve will be wiggly, because the estimate will depend heavily on points closest to $x_0$ . In this case, the model is trying to fit to a small neighborhood, thus we over-fit. Larger values for $h$/$\lambda$  means that points further away will have similar influence as points that are close to $x_0$. 
+For Loess, a large span ($\alpha$) increases the smoothness but decreases the resolution of the smoothed data set, while a small span decreases the smoothness but increases the resolution of the smoothed data set. 
+
+\newpage
+
+### 2. Tuning the smoothing parameters (equidistant)
+
+For each smoothing parameter, we compare the actual observed $Y_i$ with its smoothed estimate for a given $h$, $\alpha$, or $\lambda$  based on the $n-1$ data points without using the i-th observation. We choose the optimal tuning parameters by minimizing the average mean square error based (MSE) of the leave-one-out cross-validation. 
+
+```{r fig10, fig.width=20,fig.height=5,fig.cap="\\label{fig:fig10}Leave-One-Out CV results"}
+
+## LOOCV
+par(mfrow=c(1,3))
+set.seed(42)
+
+# sample size
+n = 101
+
+# set range of values for CV
+bandwidth = seq(0.2,2.0, 0.05)
+errors_bandwidth = rep(0,length(bandwidth))
+
+for(j in 1:length(bandwidth)){
+  error_cv = rep(0, n)
+  for(i in 1:n){
+
+    # training sets
+    xTrain = x[-i]
+    yTrain = y[-i]
+  
+    # testing sets
+    xTest = x[i]
+    yTrue = y[i]
+    
+    # Fit model
+    yPredict = ksmooth(x=xTrain,y=yTrain,kernel = "normal",bandwidth = bandwidth[j], x.points = xTest)
+    error_cv[i] = (yTrue - yPredict$y)^2
+  }
+  errors_bandwidth[j] = mean(error_cv)
+}
+
+plot(x=bandwidth, y=errors_bandwidth, type="b", lwd=3, col="limegreen", xlab="Bandwidth", ylab="MSE")
+points(bandwidth[which(errors_bandwidth == min(errors_bandwidth))], errors_bandwidth[which(errors_bandwidth == min(errors_bandwidth))] ,pch=4, col="red", cex=2)
+
+# splines
+spars = seq(0.01,2.0, 0.05)
+# set range of values for CV
+errors_spar = rep(0,length(spars))
+for(j in 1:length(spars)){
+  error_cv = rep(0, n)
+  for(i in 1:n){
+    
+    # training sets
+    xTrain = x[-i]
+    yTrain = y[-i]
+  
+    # testing sets
+    xTest = x[i]
+    yTrue = y[i]
+    
+    # Fit model
+    spline_fit = smooth.spline(x=xTrain,y=yTrain,spar=spars[j])
+    yPredict = predict(spline_fit,x=xTest)
+    error_cv[i] = (yTrue - yPredict$y)^2
+  }
+  errors_spar[j] = mean(error_cv)
+}
+
+plot(x=spars, y=errors_spar, type="b", lwd=3, col="lightblue", xlab="spar", ylab="MSE")
+points(spars[which(errors_spar == min(errors_spar))], errors_spar[which(errors_spar == min(errors_spar))] ,pch=4, col="red", cex=2)
+
+# Loess
+spans = seq(0.15, 0.95, 0.02)
+# set range of values for CV
+errors_span = rep(0,length(spans))
+for(j in 1:length(spans)){
+  error_cv = rep(0, n)
+  for(i in 1:n){
+
+    # training sets
+    xTrain = x[-i]
+    yTrain = y[-i]
+  
+    # testing sets
+    xTest = x[i]
+    yTrue = y[i]
+    
+    # Fit model
+    yPredict = predict(loess(yTrain ~ xTrain, span = spans[j]), newdata = xTest)
+    error_cv[i] = (yTrue - yPredict)^2
+  }
+  errors_span[j] = mean(error_cv,  na.rm = TRUE)
+}
+
+plot(x=spans, y=errors_span, type="b", lwd=3, col="orange", xlab="span", ylab="MSE")
+points(spans[which(errors_span == min(errors_span))], errors_span[which(errors_span == min(errors_span))] ,pch=4, col="red", cex=2)
+
+```
+
+After Leave-One-Out cross validation, we get the following values for each smoothing parameter:
+
+- The best bandwidth value that achieved the lowest MSE value is $h=$ `r bandwidth[which(errors_bandwidth == min(errors_bandwidth))]`.
+
+- The best spar value that achieved the lowest MSE value is $\lambda=$ `r spars[which(errors_spar == min(errors_spar))]`.
+
+- The best span value that achieved the lowest MSE value is $\alpha =$ `r spans[which(errors_span == min(errors_span))]`.
+
+### 3. Tuning the smoothing parameters (non-equidistant points)
+
+```{r fig21, fig.width=20,fig.height=5,fig.cap="\\label{fig:fig21}Leave-One-Out CV results"}
+
+## LOOCV
+par(mfrow=c(1,3))
+set.seed(4)
+
+# sample size
+n = 101
+
+# set y
+y2 <- (1- x2**2)*exp(-0.5*x2**2) + rnorm(length(x2), sd=0.2);
+
+# set range of values for CV
+bandwidth2 = seq(0.3,2.0, 0.05)
+errors_bandwidth2 = rep(NA,length(bandwidth2))
+
+for(j in 1:length(bandwidth2)){
+  error_cv = rep(NA, n)
+  for(i in 1:n){
+
+    # training sets
+    xTrain = x2[-i]
+    yTrain = y2[-i]
+  
+    # testing sets
+    xTest = x2[i]
+    yTrue = y2[i]
+    
+    # Fit model
+    yPredict = ksmooth(x=xTrain,y=yTrain,kernel = "normal",bandwidth = bandwidth2[j], x.points = xTest)
+    error_cv[i] = (yTrue - yPredict$y)^2
+  }
+  errors_bandwidth2[j] = mean(error_cv)
+}
+
+plot(x=bandwidth2, y=errors_bandwidth2, type="b", lwd=3, col="limegreen", xlab="Bandwidth", ylab="MSE")
+points(bandwidth2[which(errors_bandwidth2 == min(errors_bandwidth2))], errors_bandwidth2[which(errors_bandwidth2 == min(errors_bandwidth2))] ,pch=4, col="red", cex=2)
+
+# splines
+spars2 = seq(0.01,2.0, 0.05)
+# set range of values for CV
+errors_spar2 = rep(0,length(spars2))
+for(j in 1:length(spars2)){
+  error_cv = rep(0, n)
+  for(i in 1:n){
+    
+    # training sets
+    xTrain = x2[-i]
+    yTrain = y2[-i]
+  
+    # testing sets
+    xTest = x2[i]
+    yTrue = y2[i]
+    
+    # Fit model
+    spline_fit = smooth.spline(x=xTrain,y=yTrain,spar=spars2[j])
+    yPredict = predict(spline_fit,x=xTest)
+    error_cv[i] = (yTrue - yPredict$y)^2
+  }
+  errors_spar2[j] = mean(error_cv)
+}
+
+plot(x=spars2, y=errors_spar2, type="b", lwd=3, col="lightblue", xlab="spar", ylab="MSE")
+points(spars2[which(errors_spar2 == min(errors_spar2))], errors_spar2[which(errors_spar2 == min(errors_spar2))] ,pch=4, col="red", cex=2)
+
+# Loess
+spans2 = seq(0.1, 1, 0.01)
+# set range of values for CV
+errors_span2 = rep(0,length(spans2))
+for(j in 1:length(spans2)){
+  error_cv = rep(0, n)
+  for(i in 1:n){
+
+    # training sets
+    xTrain = x2[-i]
+    yTrain = y2[-i]
+  
+    # testing sets
+    xTest = x2[i]
+    yTrue = y2[i]
+    
+    # Fit model
+    yPredict = predict(loess(yTrain ~ xTrain, span = spans2[j]), newdata = xTest)
+    error_cv[i] = (yTrue - yPredict)^2
+  }
+  errors_span2[j] = mean(error_cv,  na.rm = TRUE)
+}
+
+plot(x=spans2, y=errors_span2, type="b", lwd=3, col="orange", xlab="span", ylab="MSE")
+points(spans2[which(errors_span2 == min(errors_span2))], errors_span2[which(errors_span2 == min(errors_span2))] ,pch=4, col="red", cex=2)
+
+```
+
+The Leave-One-Out cross validation using non-equidistant points yields the following results:
+
+- The best bandwidth value that achieved the lowest MSE value is $h=$ `r bandwidth2[which(errors_bandwidth2 == min(errors_bandwidth2))]`
+
+- The best spar value that achieved the lowest MSE value is $\lambda=$ `r spars2[which(errors_spar2 == min(errors_spar2))]`
+
+- The best span value that achieved the lowest MSE value is $\alpha =$ `r spans2[which(errors_span2 == min(errors_span2))]`
+
+\newpage
+
+## Part 3: Using newly tuned smoothing parameters
+
+### 1. Equidistant design
+
+After tuning the smoothing parameters, we plot the mean of each estimator with the raw observations for the equidistant design
+
+```{r fig11, fig.width=7,fig.height=5,fig.cap="\\label{fig:fig11}The mean of the three local smoothing estimators with raw observations"}
+## Part #1 deterministic equidistant design
+set.seed(2)
+m <- 1000
+n <- 101
+x <- 2*pi*seq(-1, 1, length=n)
+## Initialize the matrix of fitted values for three methods
+fvlp <- fvnw <- fvss <- matrix(0, nrow= n, ncol= m)
+##Generate data, fit the data and store the fitted values
+for (j in 1:m){
+
+  ## simulate y-values
+  y <- (1- x**2)*exp(-0.5*x**2) + rnorm(length(x), sd=0.2);
+  
+  ## Get the estimates and store them
+  fvlp[,j] <- predict(loess(y ~ x, span = spans[which(errors_span == min(errors_span))]), newdata = x);
+  fvnw[,j] <- ksmooth(x, y, kernel="normal", bandwidth= bandwidth[which(errors_bandwidth == min(errors_bandwidth))], x.points=x)$y;
+  fvss[,j] <- predict(smooth.spline(y ~ x, spar = spars[which(errors_spar == min(errors_spar))]), x=x)$y
+}
+## Below is the sample R code to plot the mean of three estimators in a single plot
+meanlp = apply(fvlp,1,mean);
+meannw = apply(fvnw,1,mean);
+meanss = apply(fvss,1,mean);
+dmin = min( meanlp, meannw, meanss);
+dmax = max( meanlp, meannw, meanss);
+matplot(x, meanlp, "l", ylim=c(dmin, dmax), ylab="Response")
+matlines(x, meannw, col="red", lty=5)
+matlines(x, meanss, col="blue", lty=6)
+points(x,mh, pch=20)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+## BIAS = f_hat - f
+biaslp = meanlp - mh
+biasnw = meannw - mh
+biasss = meanss - mh
+
+## VAR
+varlp = apply((fvlp - meanlp)**2, 1, mean);
+varnw = apply((fvnw - meannw)**2, 1, mean);
+varss = apply((fvss - meanss)**2, 1, mean);
+
+
+## MSE
+MSElp.emp = apply((fvlp - mh)**2, 1, mean);
+MSEnw.emp = apply((fvnw - mh)**2, 1, mean);
+MSEss.emp = apply((fvss - mh)**2, 1, mean);
+
+## MSE = BIAS^2 + VAR
+MSElp.calc = biaslp**2 + varlp
+MSEnw.calc = biasnw**2 + varnw
+MSEss.calc = biasss**2 + varss
+
+```
+
+Looking at the mean of each estimator after tuning, we can clearly see that all three methods performed similarly and provide a almost perfect fit for $f(x_i)$ 
+
+\newpage
+Next, we plot the new bias and variances for all three estimates
+
+```{r fig12, fig.width=20,fig.height=7,fig.cap="\\label{fig:fig12}The empirical bias and variance of the three local smoothing estimators after tuning"}
+par(mfrow=c(1,2))
+# plot BIAS
+dmin = min( biaslp, biasnw, biasss);
+dmax = max( biaslp, biasnw, biasss);
+
+matplot(x, biaslp, "l", ylim=c(dmin, dmax),  ylab="Response", main="Emperical Bias after tuning")
+matlines(x, biasnw, col="red", lty=5)
+matlines(x, biasss, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+# plot variance
+dmin = min( varlp, varnw, varss);
+dmax = max( varlp, varnw, varss);
+
+matplot(x, varlp, "l", ylim=c(dmin, dmax),ylab="Response", main="Emperical Variance after tuning")
+matlines(x, varnw, col="red", lty=5)
+matlines(x, varss, col="blue", lty=6)
+
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+```
+
+In terms of bias, we see that all of the estimators have high bias at $x_i = +/- \frac{\pi}{2}$ and a negative bias at $x_i = 0$. NW kernel has the highest bias on average. In terms of variance, we can clearly see that NW kernel and Splines smoothing variances are much lower after tuning of their respective smoothing parameters. The variances show poor behavior at the boundaries. This happens because the kernel window at the boundaries has missing data. In other words, we have weights from the kernel, but no data to associate with them. Overall, we achieve a low variance after tuning. 
+
+Now, let's take a look at the two MSE plots.
+
+```{r fig16, fig.width=20,fig.height=7,fig.cap="\\label{fig:fig16}The MSE of the three local smoothing estimators after tuning"}
+par(mfrow=c(1,2))
+# plot MSEs
+dmin = min( MSElp.emp, MSEnw.emp, MSEss.emp);
+dmax = max( MSElp.emp, MSEnw.emp, MSEss.emp);
+
+matplot(x, MSElp.emp, "l", ylim=c(dmin, dmax),main="Empirical MSE", ylab="Response")
+matlines(x, MSEnw.emp, col="red", lty=5)
+matlines(x, MSEss.emp, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+dmin = min( MSElp.calc, MSEnw.calc, MSEss.calc);
+dmax = max( MSElp.calc, MSEnw.calc, MSEss.calc);
+matplot(x, MSElp.calc, "l", ylim=c(dmin, dmax), main=expression(MSE = Bias^2 + var),ylab="Response")
+matlines(x, MSEnw.calc, col="red", lty=5)
+matlines(x, MSEss.calc, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+```
+
+In terms of MSE, NW kernel has the highest MSE that peaks at $x_i = 0$ and $x_i = +/- \frac{\pi}{2}$. Loess and splines have on average similar MSE values across the board but exhibit poor behavior at the boundaries of $x_i$
+
+\newpage
+
+### 2. Non-equidistant design
+
+After tuning the smoothing parameters, we plot the mean of each estimator with the raw observations for the non-equidistant design
+
+```{r fig17, fig.width=7,fig.height=5,fig.cap="\\label{fig:fig17}The mean of the three local smoothing estimators with raw observations"}
+## Part #2 non-equidistant design
+set.seed(79)
+x2 <- round(2*pi*sort(c(0.5, -1 + rbeta(50,2,2), rbeta(50,2,2))), 8)
+m <- 1000
+n <- 101
+## Initialize the matrix of fitted values for three methods
+fvlp2 <- fvnw2 <- fvss2 <- matrix(0, nrow= n, ncol= m)
+
+##Generate data, fit the data and store the fitted values
+for (j in 1:m){
+
+  ## simulate y-values
+  y2 <- (1- x2**2)*exp(-0.5*x2**2) + rnorm(length(x2), sd=0.2);
+  
+  ## Get the estimates and store them
+  fvlp2[,j] <- predict(loess(y2 ~ x2, span = spans2[which(errors_span2 == min(errors_span2))]), newdata = x2);
+  fvnw2[,j] <- ksmooth(x2, y2, kernel="normal", bandwidth= bandwidth2[which(errors_bandwidth2 == min(errors_bandwidth2))], x.points=x2)$y;
+  fvss2[,j] <- predict(smooth.spline(y2 ~ x2, spar= spars2[which(errors_spar2 == min(errors_spar2))]), x=x2)$y
+}
+
+
+## Below is the sample R code to plot the mean of three estimators in a single plot
+meanlp = apply(fvlp2,1,mean);
+meannw = apply(fvnw2,1,mean);
+meanss = apply(fvss2,1,mean);
+dmin = min( meanlp, meannw, meanss);
+dmax = max( meanlp, meannw, meanss);
+matplot(x2, meanlp, "l", ylim=c(dmin, dmax), ylab="Response")
+matlines(x2, meannw, col="red", lty=5)
+matlines(x2, meanss, col="blue", lty=6)
+points(x2,mh2, pch = 20)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+
+## BIAS
+biaslp = meanlp - mh2
+biasnw = meannw - mh2
+biasss = meanss - mh2
+
+## VAR
+varlp = apply((fvlp2 - meanlp)**2, 1, mean);
+varnw = apply((fvnw2 - meannw)**2, 1, mean);
+varss = apply((fvss2 - meanss)**2, 1, mean);
+
+
+## MSE
+MSElp.emp = apply((fvlp2 - mh2)**2, 1, mean);
+MSEnw.emp = apply((fvnw2 - mh2)**2, 1, mean);
+MSEss.emp = apply((fvss2 - mh2)**2, 1, mean);
+
+## MSE = BIAS^2 + VAR
+MSElp.calc = biaslp**2 + varlp
+MSEnw.calc = biasnw**2 + varnw
+MSEss.calc = biasss**2 + varss
+```
+
+Again, we see that each estimator is able to fit the function with a very good accuracy. All estimators performed similarly. 
+
+\newpage
+
+```{r fig18, fig.width=20,fig.height=7,fig.cap="\\label{fig:fig18}The empirical bias and variance of the three local smoothing estimators"}
+par(mfrow=c(1,2))
+# plot BIAS
+dmin = min( biaslp, biasnw, biasss);
+dmax = max( biaslp, biasnw, biasss);
+matplot(x2, biaslp, "l", ylim=c(dmin, dmax), ylab="Response", main="Emperical Bias after tuning")
+matlines(x2, biasnw, col="red", lty=5)
+matlines(x2, biasss, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+# plot variance
+dmin = min( varlp, varnw, varss);
+dmax = max( varlp, varnw, varss);
+matplot(x2, varlp, "l", ylim=c(dmin, dmax), ylab="Response", main="Emperical Variance after tuning")
+matlines(x2, varnw, col="red", lty=5)
+matlines(x2, varss, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+```
+
+Here again, the three estimators have high/negative bias at $x_i = 0$ and high bias at $x_i = +/- \frac{\pi}{2}$. The Bias is zero from $[-\infty, -\pi]$ and $[ \pi, +\infty]$. In terms of variance, we can clearly see that all kernels performed equally likely. We also see that all three estimators exhibit very high variances at $x_i =0$.
+
+
+```{r fig20, fig.width=20,fig.height=7,fig.cap="\\label{fig:fig20}The MSE of the three kinds of local smoothing estimators"}
+par(mfrow=c(1,2))
+# plot MSEs
+dmin = min( MSElp.emp, MSEnw.emp, MSEss.emp);
+dmax = max( MSElp.emp, MSEnw.emp, MSEss.emp);
+matplot(x2, MSElp.emp, "l", ylim=c(dmin, dmax), main="Empirical MSE", ylab="Response")
+matlines(x2, MSEnw.emp, col="red", lty=5)
+matlines(x2, MSEss.emp, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+
+dmin = min( MSElp.calc, MSEnw.calc, MSEss.calc);
+dmax = max( MSElp.calc, MSEnw.calc, MSEss.calc);
+matplot(x2, MSElp.calc, "l", ylim=c(dmin, dmax),  main=expression(MSE = Bias^2 + var), ylab="Response")
+matlines(x2, MSEnw.calc, col="red", lty=5)
+matlines(x2, MSEss.calc, col="blue", lty=6)
+## Legend
+legend("topleft", legend = c("Loess", "NW Kernel", "Spline"), lty = par_lty, col = par_col)
+```
+
+In terms of MSE, all kernels exhibit very high MSE values in the interval of $[-\frac{\pi}{2}, \frac{\pi}{2}]$, in particular at $x_i = -\frac{\pi}{2}$ and $x_i =  \frac{\pi}{2}$. NW kernel has the highest MSE at $x_i =  \frac{\pi}{2}$ and the lowest at $x_i =  -\frac{\pi}{2}$
+
+\newpage
+
+# Conclusion and Findings
+
+In this assignment, we try to understand the statistical properties  and computational challenges of three different types of local smoothing methods: **LOESS**, **Nadaraya-Watson**, and **Spline** smoothing. To better evaluate the performance of each smoothing methods, we calculated their empirical bias, empirical variance and, the empirical mean square error.
+
+In the initial equidistant design before tuning, Loess smoothing has low variance, a high bias at $x_i = -\frac{\pi}{2}$/$x_i = \frac{\pi}{2}$,and negative bias at $x_i = 0$. consequently, this leads to a high MSE at the three aforementioned points. 
+
+On the other hand, NW kernel has the lowest Bias, but the highest variance. Splines smoothing has a low bias/somewhat low variance, and low MSE. All three smoothing methods exhibit a poor behavior (high variance) at the boundaries of $X$.
+
+In the non-equidistant design where the data points are not spaced at uniform distances, all estimators yield a nonlinear output. NW kernel shows a low bias/high variance and low MSE. While, Splines and Loess show low variance and a negative bias at $x_i = 0$ $\rightarrow$ high MSE at $x_i = 0$
+
+After tuning the smoothing parameters of each estimator, we can see a lot of improvement. All estimators somewhat have comparable variance/bias in both equidistant and non-equidistant designs. All models show a balance between bias and variance with similar poor behavior on $x_i = -\frac{\pi}{2}$, $x_i = \frac{\pi}{2}$, and $x_i = 0$ especially in terms of bias and total error. 
+
+All these experiments have shed some light on the bias-variance tradeoff. In modeling, we seek an optimal balance between model complexity and the total error of a model (mse). Since **$\text{mse} = \text{bias}^2 + \text{variance}$**, the total error increases as bias or variance or both increases. This usually yields to more complex model, over-fitting or under-fitting. We saw firsthand the effect of tuning the smoothing parameters of each estimator and how that leads to a balance between variance and bias. It's worth mentioning that methods that have low variance tend to be less complex (Loess) and methods that have low bias tend to be more complex (NW kernel). Having a balance in model complexity and the model's statistical properties (bias, variance) can be challenging but it is crucial. Additionally, tuning of the smoothing parameters poses computational challenges because leave-one-out cross validation can be heavy. In practice,  it is often recommended to use the so-called generalized cross-validation. 
+
+In summary, given the underlying structure and complexity of each of the three smoothing methods, I personally do not think it was a fair comparison. However, the analysis helped me gain a solid understanding of the bias-variance tradeoff and how important are cross validation and hyper-parameter tuning. 
+
